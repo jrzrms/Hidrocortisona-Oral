@@ -1,0 +1,5 @@
+{
+  "name": "Modelo Ajuste Hidrocortisona",
+  "description": "Predictive 24-hour plasma cortisol profile simulator based on the Violaris et al. (2021) model for subcutaneous pulsatile infusion pumps.",
+  "requestFramePermissions": []
+}
