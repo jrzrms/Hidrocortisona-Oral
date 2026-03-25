@@ -1,9 +1,59 @@
 import { GoogleGenAI } from "@google/genai";
 
+// Model Selection
+export enum PKModelType {
+  WERUMEUS_BUNING_2017 = "Werumeus Buning (2017)",
+  MICHELET_2020 = "Michelet (2020)"
+}
+
+export enum CortisolType {
+  TOTAL = "Total",
+  FREE = "Libre"
+}
+
+export interface WerumeusParams {
+  ka: number;
+  clTotal: number;
+  vdTotal: number;
+  clFree: number;
+  vdFree: number;
+}
+
+export interface MicheletParams {
+  vmaxAbs: number;
+  kmAbs: number;
+  cl: number;
+  vc: number;
+  q: number;
+  vp: number;
+  base: number;
+}
+
+export interface PKParams {
+  werumeus: WerumeusParams;
+  michelet: MicheletParams;
+}
+
+export const DEFAULT_PK_PARAMS: PKParams = {
+  werumeus: {
+    ka: 1.4,
+    clTotal: 12.85,
+    vdTotal: 39.82,
+    clFree: 235.78,
+    vdFree: 474.38
+  },
+  michelet: {
+    vmaxAbs: 21600,
+    kmAbs: 4810,
+    cl: 409,
+    vc: 10.6,
+    q: 160,
+    vp: 124,
+    base: 13.3
+  }
+};
+
 // Pharmacokinetic Model Constants (Werumeus Buning et al., 2017)
-export const KA = 1.4;      // h^-1 (Absorption rate constant)
-export const CL_STD = 12.85; // L/h (Clearance for 70kg)
-export const V_STD = 39.82;  // L (Volume of distribution for 70kg)
 export const F_BIO = 0.96;   // Bioavailability (96%)
 export const C_BASAL = 15;   // nmol/L (Basal concentration)
 export const CONVERSION_FACTOR = 2760; // mg/L to nmol/L
@@ -56,30 +106,66 @@ export const PATIENT_MEASUREMENTS = [
 ];
 
 /**
- * Simulates cortisol concentration using the Bateman equation and superposition.
- * Based on Werumeus Buning et al. (2017) parameters.
+ * Calculates total cortisol from free cortisol using protein binding equilibrium.
+ */
+export function calculateTotalCortisol(cFree: number, cbg_ugml: number = 29.0): number {
+  // Conversion of CBG to nmol/L (Bmax)
+  const Bmax = cbg_ugml * 20; // Approx conversion factor
+  const Kd = 60.0;            // Standard affinity nmol/L
+  const NS = 1.5;             // Linear binding to albumin
+  
+  // Equilibrium equations
+  const c_cbg = (Bmax * cFree) / (Kd + cFree);
+  const c_alb = NS * cFree;
+  
+  return cFree + c_cbg + c_alb;
+}
+
+/**
+ * Simulates cortisol concentration using the selected model.
  */
 export function simulate(
   weight: number,
   pulses: Pulse[],
+  modelType: PKModelType = PKModelType.WERUMEUS_BUNING_2017,
+  ageDays: number = 3650, // Default 10 years
+  cortisolType: CortisolType = CortisolType.TOTAL,
+  params: PKParams = DEFAULT_PK_PARAMS,
   durationMinutes: number = 1440,
-  initialConcentration: number = 15.0, // Default to basal
+  startTimeMinutes: number = 0
+): SimulationPoint[] {
+  if (modelType === PKModelType.MICHELET_2020) {
+    return simulateMichelet(weight, ageDays, pulses, cortisolType, params.michelet, durationMinutes, startTimeMinutes);
+  }
+  return simulateWerumeus(weight, pulses, cortisolType, params.werumeus, durationMinutes, startTimeMinutes);
+}
+
+/**
+ * Werumeus Buning et al. (2017) - One compartment model
+ */
+function simulateWerumeus(
+  weight: number,
+  pulses: Pulse[],
+  cortisolType: CortisolType = CortisolType.TOTAL,
+  params: WerumeusParams,
+  durationMinutes: number = 1440,
   startTimeMinutes: number = 0
 ): SimulationPoint[] {
   const results: SimulationPoint[] = [];
   
-  // Weight-based scaling
+  // Weight-based scaling (linear for Vd and CL in this adult model context)
   const weightFactor = weight / 70;
-  const cl = CL_STD * Math.pow(weightFactor, 0.75);
-  const vd = V_STD * weightFactor;
+  
+  const cl = (cortisolType === CortisolType.TOTAL ? params.clTotal : params.clFree) * weightFactor;
+  const vd = (cortisolType === CortisolType.TOTAL ? params.vdTotal : params.vdFree) * weightFactor;
   const ke = cl / vd;
+  const ka = params.ka;
 
   // Bateman function for a single dose (returns nmol/L)
   const calcBateman = (D: number, tHours: number) => {
     if (tHours <= 0) return 0;
-    // C(t) = [D * F * ka / (Vd * (ka - ke))] * (exp(-ke*t) - exp(-ka*t))
-    const factor = (D * F_BIO * KA) / (vd * (KA - ke));
-    const concMgL = factor * (Math.exp(-ke * tHours) - Math.exp(-KA * tHours));
+    const factor = (D * F_BIO * ka) / (vd * (ka - ke));
+    const concMgL = factor * (Math.exp(-ke * tHours) - Math.exp(-ka * tHours));
     return concMgL * CONVERSION_FACTOR;
   };
 
@@ -87,18 +173,11 @@ export function simulate(
     const t_current_abs = startTimeMinutes + t_offset;
     let totalConcentration = 0;
 
-    // Superposition of all pulses
     for (const pulse of pulses) {
       let timeElapsedMin = (t_current_abs - pulse.time);
-      
-      while (timeElapsedMin < 0) {
-        timeElapsedMin += 1440;
-      }
+      while (timeElapsedMin < 0) timeElapsedMin += 1440;
 
-      // Add contribution from the most recent occurrence of this pulse
       totalConcentration += calcBateman(pulse.dose, timeElapsedMin / 60);
-      
-      // Add contribution from previous day
       totalConcentration += calcBateman(pulse.dose, (timeElapsedMin + 1440) / 60);
     }
 
@@ -109,6 +188,95 @@ export function simulate(
   }
 
   return results;
+}
+
+/**
+ * Michelet et al. (2020) - Two compartment model with saturable absorption
+ */
+function simulateMichelet(
+  weight: number,
+  ageDays: number,
+  pulses: Pulse[],
+  cortisolType: CortisolType = CortisolType.TOTAL,
+  params: MicheletParams,
+  durationMinutes: number = 1440,
+  startTimeMinutes: number = 0
+): SimulationPoint[] {
+  const results: SimulationPoint[] = [];
+  
+  // Scaling (Reference 70kg)
+  const weightFactor = weight / 70;
+  const VMAX_ABS = params.vmaxAbs; // nmol/h
+  const KM_ABS = params.kmAbs;    // nmol
+  
+  let CL = params.cl * Math.pow(weightFactor, 0.75); // L/h
+  const VC = params.vc * weightFactor;                // L
+  const Q = params.q * Math.pow(weightFactor, 0.75);  // L/h
+  const VP = params.vp * weightFactor;                 // L
+  const BASE = params.base;                             // nmol/L (Free base)
+
+  // Neonate logic: < 28 days, reduce CL by 20%
+  if (ageDays < 28) {
+    CL *= 0.8;
+  }
+
+  // State variables (nmol)
+  let A_depot = 0;
+  let A_c = 0;
+  let A_p = 0;
+
+  const dt = 1/60; // 1 minute step in hours
+  const subSteps = 6; // 10 seconds per sub-step
+  const subDt = dt / subSteps;
+  
+  // To reach steady state, we simulate 2 days and take the second
+  const totalMinutes = 1440 * 2; 
+  
+  // Map pulses to absolute times in the 2-day simulation
+  const allPulses = [
+    ...pulses.map(p => ({ ...p, time: p.time })),
+    ...pulses.map(p => ({ ...p, time: p.time + 1440 }))
+  ];
+
+  for (let step = 0; step <= totalMinutes; step++) {
+    // Add dose to depot
+    const currentPulses = allPulses.filter(p => p.time === step);
+    for (const p of currentPulses) {
+      A_depot += p.dose * CONVERSION_FACTOR;
+    }
+
+    // Sub-stepping for ODE stability
+    for (let s = 0; s < subSteps; s++) {
+      // ODEs (Euler)
+      const rate_abs = (VMAX_ABS * A_depot) / (KM_ABS + A_depot);
+      const dA_c = rate_abs - (CL / VC) * A_c - (Q / VC) * A_c + (Q / VP) * A_p;
+      const dA_p = (Q / VC) * A_c - (Q / VP) * A_p;
+
+      A_depot -= rate_abs * subDt;
+      A_c += dA_c * subDt;
+      A_p += dA_p * subDt;
+      
+      // Prevent negative values due to numerical issues
+      A_depot = Math.max(0, A_depot);
+      A_c = Math.max(0, A_c);
+      A_p = Math.max(0, A_p);
+    }
+
+    // Store results for the second day
+    if (step >= 1440) {
+      const cFree = (A_c / VC) + BASE;
+      const concentration = cortisolType === CortisolType.TOTAL 
+        ? calculateTotalCortisol(cFree) 
+        : cFree;
+
+      results.push({
+        time: (step - 1440 + startTimeMinutes) % 1440,
+        concentration: concentration
+      });
+    }
+  }
+
+  return results.sort((a, b) => a.time - b.time);
 }
 
 export const PHYSIOLOGICAL_TARGET = [
@@ -173,8 +341,7 @@ export function calculateSSE(sim: SimulationPoint[]): number {
   let sse = 0;
   const step = 15; // More granular check
   for (let t = 0; t < 1440; t += step) {
-    // Assuming sim starts at 0 and has 1-min steps
-    const point = sim[t];
+    const point = sim.find(p => p.time === t);
     if (point) {
       sse += Math.pow(point.concentration - getTargetAt(point.time), 2);
     }
@@ -190,7 +357,7 @@ export function calculateError(sim: SimulationPoint[]): number {
   const step = 15;
   let count = 0;
   for (let t = 0; t < 1440; t += step) {
-    const point = sim[t];
+    const point = sim.find(p => p.time === t);
     if (point) {
       error += Math.pow(point.concentration - getTargetAt(point.time), 2);
       count++;
@@ -206,7 +373,10 @@ export function calculateError(sim: SimulationPoint[]): number {
 export function optimizeDoses(
   weight: number,
   initialPulses: Pulse[], 
-  initialC: number
+  modelType: PKModelType = PKModelType.WERUMEUS_BUNING_2017,
+  ageDays: number = 3650,
+  cortisolType: CortisolType = CortisolType.TOTAL,
+  params: PKParams = DEFAULT_PK_PARAMS
 ): Pulse[] {
   // Start with current pulses
   let currentPulses: Pulse[] = JSON.parse(JSON.stringify(initialPulses));
@@ -228,7 +398,7 @@ export function optimizeDoses(
     currentPulses = currentPulses.slice(0, 6);
   }
 
-  let currentError = calculateError(simulate(weight, currentPulses, 1440, initialC, 0));
+  let currentError = calculateError(simulate(weight, currentPulses, modelType, ageDays, cortisolType, params, 1440, 0));
   
   const iterations = 60;
   
@@ -249,7 +419,7 @@ export function optimizeDoses(
         if (nextDose === currentPulses[j].dose) continue;
         
         currentPulses[j].dose = nextDose;
-        const newError = calculateError(simulate(weight, currentPulses, 1440, initialC, 0));
+        const newError = calculateError(simulate(weight, currentPulses, modelType, ageDays, cortisolType, params, 1440, 0));
         if (newError < currentError) {
           currentError = newError;
           improved = true;
@@ -265,7 +435,7 @@ export function optimizeDoses(
         const nextTime = (currentPulses[j].time + step + 1440) % 1440;
         
         currentPulses[j].time = nextTime;
-        const newError = calculateError(simulate(weight, currentPulses, 1440, initialC, 0));
+        const newError = calculateError(simulate(weight, currentPulses, modelType, ageDays, cortisolType, params, 1440, 0));
         if (newError < currentError) {
           currentError = newError;
           improved = true;

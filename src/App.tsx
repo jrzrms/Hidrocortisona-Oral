@@ -33,12 +33,21 @@ import {
   optimizeDoses,
   getTargetAt,
   Pulse,
-  PATIENT_MEASUREMENTS
+  PATIENT_MEASUREMENTS,
+  PKModelType,
+  CortisolType,
+  PKParams,
+  DEFAULT_PK_PARAMS
 } from './models/violarisModel';
 
 export default function App() {
   const [pulses, setPulses] = useState<Pulse[]>(STANDARD_PULSES);
   const [weight, setWeight] = useState<string>('20');
+  const [age, setAge] = useState<string>('10');
+  const [selectedModel, setSelectedModel] = useState<PKModelType>(PKModelType.WERUMEUS_BUNING_2017);
+  const [cortisolType, setCortisolType] = useState<CortisolType>(CortisolType.TOTAL);
+  const [pkParams, setPkParams] = useState<PKParams>(DEFAULT_PK_PARAMS);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [simulationData, setSimulationData] = useState<(SimulationPoint & { target: number })[]>([]);
   const [isSimulating, setIsSimulating] = useState(false);
   const [errorScore, setErrorScore] = useState<number | null>(null);
@@ -57,9 +66,9 @@ export default function App() {
   const runSimulation = (currentPulses?: Pulse[]) => {
     const p = [...(currentPulses || pulses)].sort((a, b) => a.time - b.time);
     const w = parseFloat(weight) || 20;
-    const initialC = 15.0; // Basal concentration
+    const ageDays = (parseFloat(age) || 10) * 365;
 
-    const fullSim = simulate(w, p, 1440, initialC, 0); // Start at 00:00
+    const fullSim = simulate(w, p, selectedModel, ageDays, cortisolType, pkParams, 1440, 0); // Start at 00:00
     const dataWithTarget = fullSim.map(point => {
       const m = point.time % 1440;
       const patientPoint = PATIENT_MEASUREMENTS.find(pm => pm.time === m);
@@ -77,12 +86,12 @@ export default function App() {
 
   useEffect(() => {
     runSimulation();
-  }, [weight, pulses]);
+  }, [weight, age, pulses, selectedModel, cortisolType, pkParams]);
 
   const handleOptimize = () => {
     const w = parseFloat(weight) || 20;
-    const initialC = 15.0; // Basal concentration
-    const optimized = optimizeDoses(w, pulses, initialC);
+    const ageDays = (parseFloat(age) || 10) * 365;
+    const optimized = optimizeDoses(w, pulses, selectedModel, ageDays, cortisolType, pkParams);
     setPulses(optimized);
   };
 
@@ -127,15 +136,38 @@ export default function App() {
   const pkStats = useMemo(() => {
     const w = parseFloat(weight) || 70;
     const weightFactor = w / 70;
-    const cl = 12.85 * Math.pow(weightFactor, 0.75);
-    const vd = 39.82 * weightFactor;
-    const ke = cl / vd;
-    const tHalf = Math.LN2 / ke; // in hours
-    return {
-      cl: cl.toFixed(2),
-      tHalf: (tHalf * 60).toFixed(1) // in minutes
-    };
-  }, [weight]);
+    const ageDays = (parseFloat(age) || 10) * 365;
+    
+    if (selectedModel === PKModelType.WERUMEUS_BUNING_2017) {
+      const clStd = cortisolType === CortisolType.TOTAL ? pkParams.werumeus.clTotal : pkParams.werumeus.clFree;
+      const vdStd = cortisolType === CortisolType.TOTAL ? pkParams.werumeus.vdTotal : pkParams.werumeus.vdFree;
+      
+      const cl = clStd * weightFactor;
+      const vd = vdStd * weightFactor;
+      const ke = cl / vd;
+      const tHalf = Math.LN2 / ke; // in hours
+      return {
+        cl: cl.toFixed(2),
+        tHalf: (tHalf * 60).toFixed(1) // in minutes
+      };
+    } else {
+      // Michelet 2020
+      let cl = pkParams.michelet.cl * Math.pow(weightFactor, 0.75);
+      if (ageDays < 28) cl *= 0.8;
+      
+      const vc = pkParams.michelet.vc * weightFactor;
+      const vp = pkParams.michelet.vp * weightFactor;
+      
+      const vdTotal = vc + vp;
+      const ke_eff = cl / vdTotal;
+      const tHalf = Math.LN2 / ke_eff;
+      
+      return {
+        cl: cl.toFixed(1),
+        tHalf: (tHalf * 60).toFixed(1)
+      };
+    }
+  }, [weight, age, selectedModel, cortisolType, pkParams]);
   const peaks = useMemo(() => {
     if (simulationData.length === 0) return [];
     const localPeaks: { time: string; value: number }[] = [];
@@ -182,19 +214,25 @@ export default function App() {
       <main className="grid grid-cols-1 lg:grid-cols-12 gap-0 min-h-[calc(100vh-100px)]">
         {/* Sidebar: Calibration & Pulse Editor */}
         <section className="lg:col-span-3 border-r border-[#141414] p-6 space-y-8 bg-gray-50 overflow-y-auto max-h-[calc(100vh-100px)]">
-          <div>
-            <div className="flex items-center gap-2 mb-4">
-              <Scale size={16} />
-              <h2 className="text-xs font-mono uppercase tracking-widest font-bold">Datos del Paciente</h2>
-            </div>
+          <div className="grid grid-cols-2 gap-4">
             <div className="group">
-              <label className="text-[9px] font-mono uppercase opacity-50 block mb-1">Peso Corporal (kg)</label>
+              <label className="text-[9px] font-mono uppercase opacity-50 block mb-1">Peso (kg)</label>
               <input 
                 type="number"
                 value={weight}
                 onChange={(e) => setWeight(e.target.value)}
                 className="w-full bg-white border border-[#141414]/10 p-2 font-mono text-sm focus:border-[#141414] outline-none transition-colors"
                 placeholder="70"
+              />
+            </div>
+            <div className="group">
+              <label className="text-[9px] font-mono uppercase opacity-50 block mb-1">Edad (años)</label>
+              <input 
+                type="number"
+                value={age}
+                onChange={(e) => setAge(e.target.value)}
+                className="w-full bg-white border border-[#141414]/10 p-2 font-mono text-sm focus:border-[#141414] outline-none transition-colors"
+                placeholder="10"
               />
             </div>
           </div>
@@ -221,26 +259,211 @@ export default function App() {
                 <h2 className="text-xs font-mono uppercase tracking-widest font-bold">Modelo Farmacocinético</h2>
               </div>
             </div>
+            
+            <div className="flex gap-1 bg-white border border-[#141414]/10 p-1 rounded-sm mb-4">
+              {Object.values(PKModelType).map((model) => (
+                <button
+                  key={model}
+                  onClick={() => setSelectedModel(model)}
+                  className={`flex-1 py-1.5 text-[9px] font-mono uppercase tracking-tighter transition-all ${
+                    selectedModel === model 
+                      ? 'bg-[#141414] text-white' 
+                      : 'hover:bg-[#141414]/5 text-[#141414]/50'
+                  }`}
+                >
+                  {model.split(' ')[0]}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-1 bg-white border border-[#141414]/10 p-1 rounded-sm mb-4">
+              {Object.values(CortisolType).map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setCortisolType(type)}
+                  className={`flex-1 py-1.5 text-[9px] font-mono uppercase tracking-tighter transition-all ${
+                    cortisolType === type 
+                      ? 'bg-[#141414] text-white' 
+                      : 'hover:bg-[#141414]/5 text-[#141414]/50'
+                  }`}
+                >
+                  Cortisol {type}
+                </button>
+              ))}
+            </div>
+
             <p className="text-[10px] leading-relaxed opacity-70 mb-4 italic">
-              {"Modelo de un compartimento (Werumeus Buning et al., 2017) con ajuste por peso y biodisponibilidad del 96%."}
+              {selectedModel === PKModelType.WERUMEUS_BUNING_2017 
+                ? `Modelo de un compartimento (Werumeus Buning et al., 2017) para Cortisol ${cortisolType}.`
+                : `Modelo de dos compartimentos (Michelet et al., 2020) para Cortisol ${cortisolType} (Binding no lineal).`}
             </p>
+
             <div className="bg-white border border-[#141414]/10 p-3 rounded-sm space-y-2">
-              <div className="flex justify-between text-[9px] font-mono">
-                <span className="opacity-50 uppercase">Ka (Absorción)</span>
-                <span>1.40 h⁻¹</span>
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-widest">Parámetros</span>
+                <button 
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="text-[9px] font-mono text-blue-600 hover:underline"
+                >
+                  {showAdvanced ? 'Ocultar' : 'Editar'}
+                </button>
               </div>
-              <div className="flex justify-between text-[9px] font-mono">
-                <span className="opacity-50 uppercase">F (Bioavailability)</span>
-                <span>96%</span>
-              </div>
-              <div className="flex justify-between text-[9px] font-mono">
-                <span className="opacity-50 uppercase">Vd (70kg)</span>
-                <span>39.82 L</span>
-              </div>
-              <div className="flex justify-between text-[9px] font-mono">
-                <span className="opacity-50 uppercase">CL (70kg)</span>
-                <span>12.85 L/h</span>
-              </div>
+
+              {selectedModel === PKModelType.WERUMEUS_BUNING_2017 ? (
+                <>
+                  {showAdvanced ? (
+                    <div className="grid grid-cols-2 gap-2 pt-2">
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Ka (h⁻¹)</label>
+                        <input 
+                          type="number" step="0.1"
+                          value={pkParams.werumeus.ka}
+                          onChange={(e) => setPkParams({ ...pkParams, werumeus: { ...pkParams.werumeus, ka: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">CL Total</label>
+                        <input 
+                          type="number" step="0.1"
+                          value={pkParams.werumeus.clTotal}
+                          onChange={(e) => setPkParams({ ...pkParams, werumeus: { ...pkParams.werumeus, clTotal: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Vd Total</label>
+                        <input 
+                          type="number" step="0.1"
+                          value={pkParams.werumeus.vdTotal}
+                          onChange={(e) => setPkParams({ ...pkParams, werumeus: { ...pkParams.werumeus, vdTotal: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">CL Libre</label>
+                        <input 
+                          type="number" step="0.1"
+                          value={pkParams.werumeus.clFree}
+                          onChange={(e) => setPkParams({ ...pkParams, werumeus: { ...pkParams.werumeus, clFree: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">Ka (Absorción)</span>
+                        <span>{pkParams.werumeus.ka.toFixed(2)} h⁻¹</span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">CL (70kg)</span>
+                        <span>{cortisolType === CortisolType.TOTAL ? pkParams.werumeus.clTotal : pkParams.werumeus.clFree} L/h</span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">Vd (70kg)</span>
+                        <span>{cortisolType === CortisolType.TOTAL ? pkParams.werumeus.vdTotal : pkParams.werumeus.vdFree} L</span>
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  {showAdvanced ? (
+                    <div className="grid grid-cols-2 gap-2 pt-2">
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Vmax Abs</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.vmaxAbs}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, vmaxAbs: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Km Abs</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.kmAbs}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, kmAbs: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">CL/F (70kg)</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.cl}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, cl: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Vc/F (70kg)</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.vc}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, vc: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Q/F (70kg)</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.q}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, q: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] uppercase opacity-50">Vp/F (70kg)</label>
+                        <input 
+                          type="number"
+                          value={pkParams.michelet.vp}
+                          onChange={(e) => setPkParams({ ...pkParams, michelet: { ...pkParams.michelet, vp: parseFloat(e.target.value) || 0 }})}
+                          className="w-full text-[10px] font-mono border p-1"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">Vmax_abs</span>
+                        <span>{pkParams.michelet.vmaxAbs.toLocaleString()} nmol/h</span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">Km_abs</span>
+                        <span>{pkParams.michelet.kmAbs.toLocaleString()} nmol</span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">CL/F (70kg)</span>
+                        <span>{((parseFloat(age) || 10) * 365 < 28 ? pkParams.michelet.cl * 0.8 : pkParams.michelet.cl).toFixed(0)} L/h</span>
+                      </div>
+                      <div className="flex justify-between text-[9px] font-mono">
+                        <span className="opacity-50 uppercase">Vc/F (70kg)</span>
+                        <span>{pkParams.michelet.vc} L</span>
+                      </div>
+                    </>
+                  )}
+                  {cortisolType === CortisolType.TOTAL && (
+                    <div className="pt-2 mt-2 border-t border-[#141414]/5 space-y-1">
+                      <div className="flex justify-between text-[8px] font-mono opacity-60">
+                        <span>CBG (Bmax)</span>
+                        <span>580 nmol/L</span>
+                      </div>
+                      <div className="flex justify-between text-[8px] font-mono opacity-60">
+                        <span>Kd (Afinidad)</span>
+                        <span>60 nmol/L</span>
+                      </div>
+                      <div className="flex justify-between text-[8px] font-mono opacity-60">
+                        <span>Albúmina (NS)</span>
+                        <span>1.5x</span>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
 
